@@ -8,21 +8,17 @@ from sim.sky import render_sky
 BEACON_REAL_DIAMETER_M = 0.2
 FOCAL_LENGTH_PX = 800
 
-
 class VirtualScene:
-    def __init__(
-        self, width=640, height=480, pattern="circular", sky_mode="dusk", n_decoys=4
-    ):
+    def __init__(self, width=640, height=480, pattern="circular", sky_mode="dusk", n_decoys=4):
         self.width, self.height = width, height
         self.pattern = pattern
         self.sky_mode = sky_mode
         self.t = 0
         self._last_time = time.time()
-        self.angular_speed = 0.4  # reduced speed
+        self.angular_speed = 0.4
         self.n_decoys = n_decoys
         self._decoys = self._generate_decoys()
 
-        # pattern-switching state
         self.available_patterns = ["circular", "figure8", "straight", "random"]
         self.pattern_switch_timer = random.uniform(4, 9)
         self.transition_time = 1.0
@@ -30,28 +26,25 @@ class VirtualScene:
         self._transition_elapsed = 0.0
         self._transition_start_pos = None
         self._last_raw_pos = (width // 2, height // 2)
+        self.auto_rotate = False   # only rotates through patterns when explicitly enabled
 
-        # state for "random" pattern
         self._rx, self._ry = float(width // 2), float(height // 2)
         self._vx, self._vy = 0.0, 0.0
 
-        # state for "straight" pattern (bounces, never teleports)
         self._straight_x = float(width // 2)
         self._straight_dir = 1
 
     def _generate_decoys(self):
         decoys = []
         for _ in range(self.n_decoys):
-            decoys.append(
-                {
-                    "x": random.uniform(20, self.width - 20),
-                    "y": random.uniform(20, self.height - 20),
-                    "vx": random.uniform(-15, 15),
-                    "vy": random.uniform(-15, 15),
-                    "brightness": random.randint(120, 255),
-                    "size": random.choice([2, 3, 4, 5, 8]),
-                }
-            )
+            decoys.append({
+                "x": random.uniform(20, self.width - 20),
+                "y": random.uniform(20, self.height - 20),
+                "vx": random.uniform(-15, 15),
+                "vy": random.uniform(-15, 15),
+                "brightness": random.randint(120, 255),
+                "size": random.choice([2, 3, 4, 5, 8]),
+            })
         return decoys
 
     def regenerate_decoys(self, n_decoys=None):
@@ -90,18 +83,16 @@ class VirtualScene:
             x = cx + 150 * math.sin(self.t)
             y = cy + 75 * math.sin(2 * self.t)
         elif self.pattern == "straight":
-            speed = 60  # reduced speed
+            speed = 60
             self._straight_x += speed * dt * self._straight_dir
             margin = 20
             if self._straight_x < margin or self._straight_x > self.width - margin:
                 self._straight_dir *= -1
-                self._straight_x = float(
-                    np.clip(self._straight_x, margin, self.width - margin)
-                )
+                self._straight_x = float(np.clip(self._straight_x, margin, self.width - margin))
             x, y = self._straight_x, cy
         elif self.pattern == "random":
-            accel_per_sec = 40.0  # reduced
-            max_speed = 300.0  # reduced
+            accel_per_sec = 40.0
+            max_speed = 300.0
             self._vx += np.random.uniform(-accel_per_sec, accel_per_sec) * dt
             self._vy += np.random.uniform(-accel_per_sec, accel_per_sec) * dt
             speed = math.hypot(self._vx, self._vy)
@@ -122,9 +113,28 @@ class VirtualScene:
             x, y = cx, cy
         return float(x), float(y)
 
+    def set_pattern(self, new_pattern):
+        """Manually switch patterns (e.g. from the dropdown). Blends smoothly
+        from the beacon's current position into the new pattern's trajectory,
+        instead of teleporting — same mechanism the automatic timer uses."""
+        if new_pattern == self.pattern or new_pattern not in self.available_patterns:
+            return
+        self.pattern = new_pattern
+        self._transition_start_pos = self._last_raw_pos
+        self._transitioning = True
+        self._transition_elapsed = 0.0
+        self.pattern_switch_timer = random.uniform(4, 9)
+
+    def enable_auto_rotate(self):
+        self.auto_rotate = True
+        self.pattern_switch_timer = random.uniform(4, 9)
+
+    def disable_auto_rotate(self):
+        self.auto_rotate = False
+
     def get_beacon_position(self, dt):
         self.pattern_switch_timer -= dt
-        if self.pattern_switch_timer <= 0 and not self._transitioning:
+        if self.auto_rotate and self.pattern_switch_timer <= 0 and not self._transitioning:
             choices = [p for p in self.available_patterns if p != self.pattern]
             self.pattern = random.choice(choices)
             self._transition_start_pos = self._last_raw_pos
@@ -138,14 +148,8 @@ class VirtualScene:
         if self._transitioning:
             self._transition_elapsed += dt
             frac = min(self._transition_elapsed / self.transition_time, 1.0)
-            bx = (
-                self._transition_start_pos[0]
-                + (raw_x - self._transition_start_pos[0]) * frac
-            )
-            by = (
-                self._transition_start_pos[1]
-                + (raw_y - self._transition_start_pos[1]) * frac
-            )
+            bx = self._transition_start_pos[0] + (raw_x - self._transition_start_pos[0]) * frac
+            by = self._transition_start_pos[1] + (raw_y - self._transition_start_pos[1]) * frac
             if frac >= 1.0:
                 self._transitioning = False
             return int(bx), int(by)
@@ -167,10 +171,7 @@ class VirtualScene:
         return self._scale
 
     def estimate_distance_m(self):
-        if (
-            not hasattr(self, "last_core_diameter_px")
-            or self.last_core_diameter_px <= 0
-        ):
+        if not hasattr(self, "last_core_diameter_px") or self.last_core_diameter_px <= 0:
             return None
         return (BEACON_REAL_DIAMETER_M * FOCAL_LENGTH_PX) / self.last_core_diameter_px
 
@@ -180,13 +181,8 @@ class VirtualScene:
         frame = render_sky(self.width, self.height, mode=self.sky_mode).copy()
 
         for d in self._decoys:
-            cv2.circle(
-                frame,
-                (int(d["x"]), int(d["y"])),
-                d["size"],
-                (d["brightness"], d["brightness"], d["brightness"]),
-                -1,
-            )
+            cv2.circle(frame, (int(d["x"]), int(d["y"])), d["size"],
+                       (d["brightness"], d["brightness"], d["brightness"]), -1)
 
         x, y = self.get_beacon_position(dt)
         scale = self.get_beacon_scale(dt)
